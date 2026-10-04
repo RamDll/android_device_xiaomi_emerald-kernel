@@ -189,3 +189,7 @@ xiaomi_spi_tee.ko
 mi_thermal_message.ko
 hq_CPU_temp.ko
 hq_charge_temp.ko
+xiaomi.ko
+switch_class.ko
+ft3683g.ko
+gt9916.ko

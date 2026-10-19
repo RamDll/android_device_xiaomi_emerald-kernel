@@ -37,3 +37,25 @@ A wrong kCFI hash panics the kernel on `insmod`, so compare with the stock modul
   `init_module` is `0x6fbb3035`.
 - `.gnu.linkonce.this_module`: size 0x640, `init_module` relocation at 0x188 and `cleanup_module` at
   0x5f8, as in the stock module.
+
+## Changes against the imported source
+
+**Re-initialize LVTS on resume.** LVTS loses power in s2idle, and the stock module has empty suspend/resume
+callbacks, so after the first sleep every LVTS thermal zone (CPU, GPU, SoC) reads invalid until a reboot. The
+5.10 driver for the same chip (MotorolaMobilityLLC/kernel-mtk 4cbe43fe20dc, branch android-13-release-ttt)
+stops the sensors on suspend (`lvts_close`) and runs `lvts_init` on resume. We do the same with the 6.12 ops,
+except that suspend only stops sensing: unlike `lvts_close` it neither closes the devices nor turns `lvts_clk`
+off, and the clock reference taken at probe is never dropped, not even on remove.
+
+- `suspend_noirq` stops sensing; `resume_noirq` resets the controllers and re-runs device identification,
+  enable/init, RC count, calibration, controller init, enables sensing and arms the hardware reboot.
+- Calibration: LK programs the efuse calibration and the 6.12 driver keeps no copy, so probe saves what LK
+  wrote (EDATA registers) and resume writes it back. If a sensor has none, RC is measured as usual.
+- Clock: the driver only looks up `lvts_clk`, which LK leaves on; probe now holds a reference so it stays on.
+- Hardware over-temperature reboot: resume arms it at 113.5 C, as the 5.10 driver did. Stock LK leaves it off
+  (PROTTC 0) and the 6.12 driver arms it only from `set_trip_temp`; keeping it on is the user's decision.
+- Root-only parameter `reinit` (write 1) re-runs the init by hand and logs the calibration registers before and
+  after.
+
+Tested on the phone 2026-10-19 (module sha256 81f680cf..., loaded with rmmod/insmod, the stock module stays in
+vendor_dlkm): 12 suspends, all LVTS zones live after each, the LK calibration identical after every resume.

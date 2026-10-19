@@ -1763,6 +1763,11 @@ static int lvts_get_chipid(void)
 	return chip_id->sw_ver;
 }
 
+/* emerald: the instance the "reinit" module parameter acts on */
+static struct lvts_data *lvts_reinit_target;
+
+static void lvts_probe_done(struct lvts_data *lvts_data);
+
 static int lvts_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1799,6 +1804,8 @@ static int lvts_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	lvts_probe_done(lvts_data);
+
 
 	return 0;
 }
@@ -1807,16 +1814,194 @@ static void lvts_remove(struct platform_device *pdev)
 {
 }
 
+/*
+ * emerald: this driver version leaves the LVTS start-up to the bootloader (LK) and its
+ * suspend/resume callbacks were empty. On mt6789 the controllers stop measuring after the
+ * first s2idle suspend: the MSR registers read 0 and every zone reports THERMAL_TEMP_INVALID
+ * until the next reboot. Bring back the start-up sequence of the 5.10 driver (lvts_init /
+ * lvts_close) for platforms whose ops can program the hardware.
+ */
+static bool lvts_can_init_hw(struct lvts_data *lvts_data)
+{
+	return lvts_data->ops.device_enable_and_init && lvts_data->ops.init_controller;
+}
+
+static void lvts_reset(struct lvts_data *lvts_data)
+{
+	unsigned int i;
+
+	for (i = 0; i < lvts_data->num_domain; i++) {
+		if (lvts_data->domain[i].reset) {
+			reset_control_assert(lvts_data->domain[i].reset);
+			reset_control_deassert(lvts_data->domain[i].reset);
+		}
+	}
+}
+
+static void lvts_dump_cal(struct lvts_data *lvts_data, const char *when)
+{
+	void __iomem *base;
+	unsigned int i;
+
+	for (i = 0; i < lvts_data->num_tc; i++) {
+		base = GET_BASE_ADDR(i);
+		dev_info(lvts_data->dev,
+			"[Thermal/LVTS]%s tc%u EDATA %x %x %x %x PROTTC %x MONCTL0 %x\n",
+			when, i, readl(LVTSEDATA00_0 + base), readl(LVTSEDATA01_0 + base),
+			readl(LVTSEDATA02_0 + base), readl(LVTSEDATA03_0 + base),
+			readl(LVTSPROTTC_0 + base), readl(LVTSMONCTL0_0 + base));
+	}
+}
+
+/*
+ * Keep the calibration the bootloader programmed (as the 5.10 driver did after an LK init):
+ * set_cal_data writes efuse_data back on resume, and init_done makes read_count_rc_n skip a
+ * new RC measurement. If a sensor has no calibration (LK did not init LVTS), measure as usual.
+ */
+static void lvts_save_lk_calibration(struct lvts_data *lvts_data)
+{
+	struct sensor_cal_data *cal_data = &lvts_data->cal_data;
+	struct tc_settings *tc = lvts_data->tc;
+	unsigned int i, j, s_index;
+	unsigned int *efuse_data;
+	void __iomem *base;
+
+	efuse_data = devm_kcalloc(lvts_data->dev, lvts_data->num_sensor,
+				  sizeof(*efuse_data), GFP_KERNEL);
+	if (!efuse_data)
+		return;
+
+	for (i = 0; i < lvts_data->num_tc; i++) {
+		base = GET_BASE_ADDR(i);
+		for (j = 0; j < tc[i].num_sensor; j++) {
+			if (tc[i].sensor_on_off[j] != SEN_ON)
+				continue;
+			s_index = tc[i].sensor_map[j];
+			efuse_data[s_index] = readl(LVTSEDATA00_0 + base + 0x4 * j);
+			if (efuse_data[s_index] == 0) {
+				dev_info(lvts_data->dev,
+					"[Thermal/LVTS]no LK calibration for tc%u sensor%u, RC will be measured\n",
+					i, j);
+				return;
+			}
+		}
+	}
+
+	cal_data->efuse_data = efuse_data;
+	lvts_data->init_done = true;
+}
+
+static void lvts_probe_done(struct lvts_data *lvts_data)
+{
+	int ret;
+
+	lvts_reinit_target = lvts_data;
+	if (!lvts_can_init_hw(lvts_data))
+		return;
+
+	/* LK leaves the controller clock on; hold a reference so it stays on */
+	ret = clk_prepare_enable(lvts_data->clk);
+	if (ret)
+		dev_err(lvts_data->dev, "[Thermal/LVTS]clk_prepare_enable failed: %d\n", ret);
+
+	lvts_dump_cal(lvts_data, "probe");
+	lvts_save_lk_calibration(lvts_data);
+}
+
+static void lvts_init_hw(struct lvts_data *lvts_data)
+{
+	struct platform_ops *ops = &lvts_data->ops;
+	int ret;
+
+	lvts_dump_cal(lvts_data, "before-init");
+	lvts_reset(lvts_data);
+
+	if (ops->device_identification)
+		ops->device_identification(lvts_data);
+
+	ops->device_enable_and_init(lvts_data);
+
+	if (IS_ENABLE(FEATURE_DEVICE_AUTO_RCK)) {
+		if (ops->device_enable_auto_rck)
+			ops->device_enable_auto_rck(lvts_data);
+	} else {
+		if (ops->device_read_count_rc_n) {
+			ret = ops->device_read_count_rc_n(lvts_data);
+			if (ret) {
+				dev_err(lvts_data->dev, "[Thermal/LVTS]read_count_rc_n failed: %d\n", ret);
+				return;
+			}
+		}
+	}
+
+	if (ops->set_cal_data)
+		ops->set_cal_data(lvts_data);
+
+	disable_all_sensing_points(lvts_data);
+	lvts_wait_for_all_sensing_point_idle(lvts_data);
+
+	ops->init_controller(lvts_data);
+
+	enable_all_sensing_points(lvts_data);
+	set_all_tc_hw_reboot(lvts_data);
+
+	lvts_data->init_done = true;
+	lvts_dump_cal(lvts_data, "after-init");
+}
+
+/* Re-run the start-up sequence by hand (root only): echo 1 > .../parameters/reinit */
+static int lvts_reinit_set(const char *val, const struct kernel_param *kp)
+{
+	struct lvts_data *lvts_data = lvts_reinit_target;
+	unsigned int i;
+	bool run;
+	int ret;
+
+	ret = kstrtobool(val, &run);
+	if (ret)
+		return ret;
+	if (!run)
+		return 0;
+	if (!lvts_data || !lvts_can_init_hw(lvts_data))
+		return -ENODEV;
+
+	for (i = 0; i < lvts_data->num_domain; i++)
+		disable_irq(lvts_data->domain[i].irq_num);
+	lvts_init_hw(lvts_data);
+	for (i = 0; i < lvts_data->num_domain; i++)
+		enable_irq(lvts_data->domain[i].irq_num);
+	dev_info(lvts_data->dev, "[Thermal/LVTS]%s: done\n", __func__);
+
+	return 0;
+}
+
+static const struct kernel_param_ops lvts_reinit_ops = {
+	.set = lvts_reinit_set,
+};
+module_param_cb(reinit, &lvts_reinit_ops, NULL, 0200);
+
 static int lvts_suspend_noirq(struct device *dev)
 {
+	struct lvts_data *lvts_data = dev_get_drvdata(dev);
+
 	dev_info(dev, "[Thermal/LVTS]%s\n", __func__);
+
+	if (lvts_data && lvts_can_init_hw(lvts_data)) {
+		disable_all_sensing_points(lvts_data);
+		lvts_wait_for_all_sensing_point_idle(lvts_data);
+	}
 
 	return 0;
 }
 
 static int lvts_resume_noirq(struct device *dev)
 {
+	struct lvts_data *lvts_data = dev_get_drvdata(dev);
+
 	dev_info(dev, "[Thermal/LVTS]%s\n", __func__);
+
+	if (lvts_data && lvts_can_init_hw(lvts_data))
+		lvts_init_hw(lvts_data);
 
 	return 0;
 }

@@ -15,5 +15,8 @@ vendor_dlkm, system_dlkm and odm_dlkm are not here: the device tree ships the st
 unchanged (`BOARD_PREBUILT_*IMAGE`), so their modules come with them. Note that zram/zsmalloc exist
 in both vendor_ramdisk and system_dlkm with different contents (as on stock).
 
+`modules/soc_temp_lvts/` is the source of the MediaTek LVTS thermal driver, built out of tree for this
+kernel (see its README). The build does not use it.
+
 Stock vendor_boot bootconfig (for reference): `kernel.rcu_nocbs=all kernel.rcutree.enable_rcu_lazy=1
 kernel.rcupdate.rcu_cpu_stall_cputime=1`; vendor cmdline `bootopt=64S3,32N2,64N2 bootconfig`.

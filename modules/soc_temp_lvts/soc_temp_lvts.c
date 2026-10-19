@@ -1765,6 +1765,7 @@ static int lvts_get_chipid(void)
 
 /* emerald: the instance the "reinit" module parameter acts on */
 static struct lvts_data *lvts_reinit_target;
+static bool lvts_clk_held;
 
 static void lvts_probe_done(struct lvts_data *lvts_data);
 
@@ -1812,6 +1813,18 @@ static int lvts_probe(struct platform_device *pdev)
 
 static void lvts_remove(struct platform_device *pdev)
 {
+	struct lvts_data *lvts_data = platform_get_drvdata(pdev);
+
+	/* emerald: undo lvts_probe_done(); the param lock keeps a "reinit" write out */
+	kernel_param_lock(THIS_MODULE);
+	if (lvts_reinit_target == lvts_data)
+		lvts_reinit_target = NULL;
+	kernel_param_unlock(THIS_MODULE);
+
+	if (lvts_clk_held) {
+		clk_disable_unprepare(lvts_data->clk);
+		lvts_clk_held = false;
+	}
 }
 
 /*
@@ -1895,7 +1908,9 @@ static void lvts_probe_done(struct lvts_data *lvts_data)
 {
 	int ret;
 
+	kernel_param_lock(THIS_MODULE);
 	lvts_reinit_target = lvts_data;
+	kernel_param_unlock(THIS_MODULE);
 	if (!lvts_can_init_hw(lvts_data))
 		return;
 
@@ -1903,6 +1918,8 @@ static void lvts_probe_done(struct lvts_data *lvts_data)
 	ret = clk_prepare_enable(lvts_data->clk);
 	if (ret)
 		dev_err(lvts_data->dev, "[Thermal/LVTS]clk_prepare_enable failed: %d\n", ret);
+	else
+		lvts_clk_held = true;
 
 	lvts_dump_cal(lvts_data, "probe");
 	lvts_save_lk_calibration(lvts_data);

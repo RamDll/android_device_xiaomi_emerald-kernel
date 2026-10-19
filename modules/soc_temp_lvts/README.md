@@ -45,7 +45,7 @@ callbacks, so after the first sleep every LVTS thermal zone (CPU, GPU, SoC) read
 5.10 driver for the same chip (MotorolaMobilityLLC/kernel-mtk 4cbe43fe20dc, branch android-13-release-ttt)
 stops the sensors on suspend (`lvts_close`) and runs `lvts_init` on resume. We do the same with the 6.12 ops,
 except that suspend only stops sensing: unlike `lvts_close` it neither closes the devices nor turns `lvts_clk`
-off, and the clock reference taken at probe is never dropped, not even on remove.
+off; the clock reference taken at probe is held until remove.
 
 - `suspend_noirq` stops sensing; `resume_noirq` resets the controllers and re-runs device identification,
   enable/init, RC count, calibration, controller init, enables sensing and arms the hardware reboot.
@@ -56,6 +56,11 @@ off, and the clock reference taken at probe is never dropped, not even on remove
   (PROTTC 0) and the 6.12 driver arms it only from `set_trip_temp`; keeping it on is the user's decision.
 - Root-only parameter `reinit` (write 1) re-runs the init by hand and logs the calibration registers before and
   after.
+- Remove drops the clock reference and clears the `reinit` target (under the module's parameter lock), so that
+  the module can be unloaded and loaded again.
 
 Tested on the phone 2026-10-19 (module sha256 81f680cf..., loaded with rmmod/insmod, the stock module stays in
 vendor_dlkm): 12 suspends, all LVTS zones live after each, the LK calibration identical after every resume.
+With the remove fix (2026-10-20, module sha256 acb68959..., stripped with `llvm-strip --strip-debug`): one
+unload/load cycle of the new remove (lvts_clk enable count 3 -> 2 -> 3), reinit, then suspends with the LK
+calibration restored on every resume.

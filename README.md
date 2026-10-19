@@ -9,6 +9,7 @@ Prebuilt kernel for Xiaomi emerald, taken unmodified from stock HyperOS 3 Global
 | `dtb/mt6789.dtb` | stock `vendor_boot.img` dtb |
 | `dtbo.img` | stock `dtbo.img` |
 | `vendor_ramdisk/` | stock `vendor_boot.img` vendor_ramdisk00 `lib/modules` (*.ko, modules.load, modules.load.recovery) |
+| `vendor_ramdisk/{xiaomi,switch_class,ft3683g,gt9916}.ko` | stock `vendor_dlkm.img` `lib/modules`, unmodified; appended to modules.load.recovery only (touchscreen in recovery: Focaltech ft3683g, Goodix gt9916 and their two vendor_dlkm dependencies) |
 
 vendor_dlkm, system_dlkm and odm_dlkm are not here: the device tree ships the stock partition images
 unchanged (`BOARD_PREBUILT_*IMAGE`), so their modules come with them. Note that zram/zsmalloc exist

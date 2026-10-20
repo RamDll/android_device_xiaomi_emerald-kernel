@@ -1,8 +1,8 @@
 # soc_temp_lvts.ko source for emerald
 
 MediaTek LVTS thermal driver (the CPU / GPU / SoC sensors of mt6789), built out of tree for the stock GKI
-kernel in this repo (6.12.30, ci.android.com build 13847919, kernel/common 6e872b4863d6). Not used by the
-build: vendor_dlkm still ships the stock module.
+kernel in this repo (6.12.30, ci.android.com build 13847919, kernel/common 6e872b4863d6). The build ships
+it as `vendor_dlkm/soc_temp_lvts.ko` (see the top-level README).
 
 | File | Source |
 |---|---|
